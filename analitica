@@ -1,0 +1,439 @@
+# ==========================================
+# ANALITICA PREDICTIVA - GUIA_APE4_CLEAN
+# ==========================================
+
+# ============
+# LIBRERIAS
+# ============
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sqlalchemy import create_engine
+from urllib.parse import quote_plus
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    accuracy_score
+)
+
+# ==========================================
+# CONEXION SQL SERVER
+# ==========================================
+
+from sqlalchemy import create_engine
+from urllib.parse import quote_plus
+
+SERVER = "192.168.18.18"
+DATABASE = "GUIA_APE4_CLEAN"
+USERNAME = "sa"
+PASSWORD = "12345"
+
+connection_string = (
+    "DRIVER={ODBC Driver 18 for SQL Server};"
+    f"SERVER={SERVER};"
+    f"DATABASE={DATABASE};"
+    f"UID={USERNAME};"
+    f"PWD={PASSWORD};"
+    "TrustServerCertificate=yes;"
+    "Encrypt=no;"
+)
+
+params = quote_plus(connection_string)
+
+engine = create_engine(
+    f"mssql+pyodbc:///?odbc_connect={params}"
+)
+
+print("Conexión exitosa")
+
+# ==========================================
+# CARGAR DATOS
+# ==========================================
+
+query = """
+SELECT
+    fv.id_fact_venta,
+    fv.id_venta_odoo,
+    fv.id_cliente_sk,
+    fv.id_producto_sk,
+    fv.id_fecha,
+    fv.id_sucursal_sk,
+    fv.id_vendedor_sk,
+    fv.id_metodo_pago_sk,
+    fv.cantidad,
+    fv.precio_unitario,
+    fv.subtotal,
+    fv.iva,
+    fv.total,
+
+    df.fecha,
+    df.mes,
+    df.anio,
+    df.nombre_mes,
+
+    dc.ciudad,
+
+    dp.categoria,
+    dp.stock,
+    dp.precio,
+
+    ds.nombre_sucursal,
+    dv.nombre_vendedor,
+    mp.metodo_pago
+
+FROM fact_ventas fv
+
+INNER JOIN dim_fecha df
+ON fv.id_fecha = df.id_fecha
+
+INNER JOIN dim_cliente dc
+ON fv.id_cliente_sk = dc.id_cliente_sk
+
+INNER JOIN dim_producto dp
+ON fv.id_producto_sk = dp.id_producto_sk
+
+INNER JOIN dim_sucursal ds
+ON fv.id_sucursal_sk = ds.id_sucursal
+
+INNER JOIN dim_vendedor dv
+ON fv.id_vendedor_sk = dv.id_vendedor
+
+INNER JOIN dim_metodo_pago mp
+ON fv.id_metodo_pago_sk = mp.id_metodo_pago
+"""
+
+df = pd.read_sql(query, engine)
+
+print(df.head())
+
+# ==========================================
+# CREAR VARIABLE dias_entrega
+# ==========================================
+
+np.random.seed(42)
+
+df['fecha'] = pd.to_datetime(df['fecha'])
+
+
+df['dias_entrega'] = (
+    2
+    + (df['cantidad'] * 0.08)
+    + (df['total'] / 25000)
+    + (df['stock'] * 0.004)
+    + (df['precio'] * 0.003)
+    + np.random.normal(0, 0.15, len(df))
+)
+
+df['dias_entrega'] = (
+    df['dias_entrega']
+    .clip(lower=1, upper=12)
+)
+
+print("\nVariable dias_entrega creada")
+print(df[['cantidad',
+          'total',
+          'stock',
+          'precio',
+          'dias_entrega']].head())
+
+# ==========================================
+# REGRESION LINEAL
+# ESTIMACION TIEMPO ENTREGA
+# ==========================================
+
+print("\n===== REGRESION LINEAL =====")
+
+X = df[[
+    'cantidad',
+    'total',
+    'stock',
+    'precio'
+]]
+
+y = df['dias_entrega']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+    random_state=42
+)
+
+modelo_regresion = LinearRegression()
+
+modelo_regresion.fit(
+    X_train,
+    y_train
+)
+
+predicciones = modelo_regresion.predict(
+    X_test
+)
+
+# ==========================================
+# METRICAS REGRESION
+# ==========================================
+
+mae = mean_absolute_error(
+    y_test,
+    predicciones
+)
+
+rmse = np.sqrt(
+    mean_squared_error(
+        y_test,
+        predicciones
+    )
+)
+
+print("\nMETRICAS REGRESION")
+
+print(f"MAE: {mae:.2f}")
+print(f"RMSE: {rmse:.2f}")
+
+# ==========================================
+# RANDOM FOREST
+# CLASIFICACION CLIENTES
+# ==========================================
+
+print("\n===== RANDOM FOREST =====")
+
+# ==========================================
+# RESUMEN POR CLIENTE
+# ==========================================
+
+resumen_cliente = df.groupby(
+    ['id_cliente_sk', 'mes']
+).agg(
+    cantidad_total=('cantidad', 'sum'),
+    gasto_total=('total', 'sum'),
+    frecuencia_compras=('id_fact_venta', 'count'),
+    promedio_precio=('precio', 'mean'),
+    stock_promedio=('stock', 'mean')
+).reset_index()
+
+print("\nResumen clientes:")
+print(resumen_cliente.head())
+
+# ==========================================
+# CREAR VARIABLE OBJETIVO
+# CLIENTE PREMIUM
+# ==========================================
+
+# Mediana para balancear clases
+umbral = resumen_cliente[
+    'gasto_total'
+].median()
+
+
+resumen_cliente[
+    'cliente_premium'
+] = np.where(
+    resumen_cliente[
+        'gasto_total'
+    ] >= umbral,
+    1,
+    0
+)
+
+print("\nDistribución clases:")
+print(
+    resumen_cliente[
+        'cliente_premium'
+    ].value_counts()
+)
+
+# ==========================================
+# VARIABLES PREDICTORAS
+# ==========================================
+X_rf = resumen_cliente[[
+    'cantidad_total',
+    'frecuencia_compras',
+    'promedio_precio',
+    'stock_promedio'
+]]
+y_rf = resumen_cliente[
+    'cliente_premium'
+]
+# ==========================================
+# TRAIN TEST SPLIT
+# ==========================================
+X_train_rf, X_test_rf, y_train_rf, y_test_rf = train_test_split(
+    X_rf,
+    y_rf,
+    test_size=0.30,
+    random_state=42,
+    stratify=y_rf
+)
+# ==========================================
+# MODELO RANDOM FOREST
+# ==========================================
+modelo_rf = RandomForestClassifier(
+    n_estimators=50,
+    max_depth=4,
+    min_samples_split=10,
+    min_samples_leaf=5,
+    random_state=42
+)
+modelo_rf.fit(
+    X_train_rf,
+    y_train_rf
+)
+# ==========================================
+# PREDICCIONES
+# ==========================================
+pred_rf = modelo_rf.predict(
+    X_test_rf
+)
+accuracy = accuracy_score(
+    y_test_rf,
+    pred_rf
+)
+print("\nMETRICAS RANDOM FOREST")
+print(f"Accuracy: {accuracy:.2%}")
+
+# ==========================================
+# VISUALIZACIONES
+# ==========================================
+
+# REGRESION LINEAL
+plt.figure(figsize=(8,5))
+plt.scatter(
+    y_test,
+    predicciones
+)
+plt.xlabel("Valor Real")
+plt.ylabel("Predicción")
+plt.title(
+    "Regresión Lineal - Tiempo de Entrega"
+)
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# ==========================================
+# GRAFICA ERROR REGRESION
+# ==========================================
+
+errores = y_test - predicciones
+
+plt.figure(figsize=(8,5))
+plt.hist(
+    errores,
+    bins=20
+)
+plt.title(
+    'Distribución del Error del Modelo'
+)
+plt.xlabel(
+    'Error de Predicción'
+)
+plt.ylabel(
+    'Frecuencia'
+)
+plt.tight_layout()
+plt.show()
+# RANDOM FOREST
+importances = pd.Series(
+    modelo_rf.feature_importances_,
+    index=X_rf.columns
+)
+plt.figure(figsize=(8,5))
+importances.sort_values().plot(
+    kind='barh'
+)
+plt.title(
+    'Variables más importantes Random Forest'
+)
+plt.xlabel('Importancia')
+plt.tight_layout()
+plt.show()
+
+# ==========================================
+# RESULTADOS PARA DASHBOARD
+# ==========================================
+X_test_reset = X_test.reset_index(drop=True)
+y_test_reset = y_test.reset_index(drop=True)
+
+datos_dashboard = df.loc[
+    X_test.index
+].copy().reset_index(drop=True)
+datos_dashboard[
+    'real_entrega'
+] = y_test_reset.astype(int)
+datos_dashboard[
+    'prediccion_entrega'
+] = np.round(
+    predicciones
+).astype(int)
+datos_dashboard[
+    'prediccion_entrega'
+] = datos_dashboard[
+    'prediccion_entrega'
+].clip(lower=1)
+resultado_dashboard = datos_dashboard[[
+    'fecha',
+    'mes',
+    'anio',
+    'nombre_mes',
+    'ciudad',
+    'nombre_sucursal',
+    'nombre_vendedor',
+    'metodo_pago',
+    'categoria',
+    'cantidad',
+    'stock',
+    'precio',
+    'total',
+    'real_entrega',
+    'prediccion_entrega'
+]]
+
+resultado_dashboard.to_csv(
+    'dashboard_predicciones.csv',
+    index=False
+)
+
+# ==========================================
+# DASHBOARD PREDICTIVO
+# ==========================================
+
+plt.figure(figsize=(8,5))
+plt.hist(
+    predicciones,
+    bins=10
+)
+plt.title(
+    'Distribución Tiempo Estimado Entrega'
+)
+plt.xlabel(
+    'Días Entrega Predichos'
+)
+plt.ylabel(
+    'Frecuencia'
+)
+plt.tight_layout()
+plt.show()
+print("\nArchivo dashboard_predicciones.csv generado")
+
+# ==========================================
+# INTERPRETACION DE NEGOCIO
+# ==========================================
+print("\n===== INTERPRETACION =====")
+print(
+    f"""
+1. El modelo de regresión tiene un
+MAE de {mae:.2f} días.
+2. El error promedio RMSE fue de
+{rmse:.2f} días.
+3. El modelo Random Forest logró una
+precisión de {accuracy:.2%}.
+
+"""
+)
